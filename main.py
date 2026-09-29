@@ -6,7 +6,6 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -33,9 +32,15 @@ from PyQt6.QtWidgets import (
 
 from config import PEOPLE
 from csv_report import ensure_settings, load_report_dir, save_report_dir, write_report_csv
+from paths import app_root, resource_root
 
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+ASSETS_DIR = resource_root() / "assets"
 CHECKBOX_SIZE = 20
+ROW_BG = QColor("#171d26")
+ROW_ALT_BG = QColor("#1d2530")
+ROW_TOTAL_BG = QColor("#24352f")
+ROW_HIGHLIGHT_BG = QColor("#3a6f8c")
+TEXT_COLOR = QColor("#ffffff")
 
 
 def _draw_checkbox_frame(painter: QPainter, size: int, border: QColor) -> None:
@@ -69,13 +74,23 @@ def _make_checkbox_icon(checked: bool) -> QPixmap:
 
 
 def ensure_checkbox_icons() -> tuple[str, str]:
-    ASSETS_DIR.mkdir(exist_ok=True)
-    unchecked_path = ASSETS_DIR / "checkbox_off.png"
-    checked_path = ASSETS_DIR / "checkbox_on.png"
-    if not unchecked_path.exists():
-        _make_checkbox_icon(False).save(str(unchecked_path), "PNG")
-    if not checked_path.exists():
-        _make_checkbox_icon(True).save(str(checked_path), "PNG")
+    assets_dir = ASSETS_DIR
+    unchecked_path = assets_dir / "checkbox_off.png"
+    checked_path = assets_dir / "checkbox_on.png"
+
+    # В собранном приложении assets только для чтения — при отсутствии
+    # кладём иконки рядом с исполняемым файлом.
+    if not unchecked_path.exists() or not checked_path.exists():
+        if getattr(sys, "frozen", False):
+            assets_dir = app_root() / "assets"
+            unchecked_path = assets_dir / "checkbox_off.png"
+            checked_path = assets_dir / "checkbox_on.png"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        if not unchecked_path.exists():
+            _make_checkbox_icon(False).save(str(unchecked_path), "PNG")
+        if not checked_path.exists():
+            _make_checkbox_icon(True).save(str(checked_path), "PNG")
+
     return unchecked_path.as_posix(), checked_path.as_posix()
 
 
@@ -120,7 +135,7 @@ QTableWidget {{
     border-radius: 10px;
     gridline-color: #2c3645;
     font-size: 14px;
-    selection-background-color: #2a4a3d;
+    selection-background-color: #3a6f8c;
     selection-color: #ffffff;
     outline: none;
 }}
@@ -327,6 +342,7 @@ class MainWindow(QMainWindow):
         self.person_boxes: list[dict[str, QCheckBox]] = []
         self.common_boxes: list[QCheckBox] = []
         self._syncing = False
+        self._highlighted_row: int | None = None
 
         self.setWindowTitle("Распределение покупок")
         self.resize(980, 760)
@@ -353,9 +369,11 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.cellClicked.connect(self._on_cell_clicked)
 
         header_view = self.table.horizontalHeader()
         header_view.setHighlightSections(False)
@@ -406,8 +424,10 @@ class MainWindow(QMainWindow):
         self.person_boxes = []
         self.common_boxes = []
         self._syncing = False
+        self._highlighted_row = None
 
         self.table.clearContents()
+        self.table.clearSelection()
         self.table.setRowCount(len(items) + 1)
         self.subtitle.setText(
             f"Позиций: {len(items)}  ·  отметьте владельцев или включите «Общак»"
@@ -418,22 +438,17 @@ class MainWindow(QMainWindow):
         bold.setBold(True)
         bold.setPointSize(13)
 
-        text_color = QColor("#ffffff")
-        row_bg = QColor("#171d26")
-        alt_bg = QColor("#1d2530")
-        total_bg = QColor("#24352f")
-
         for row, item in enumerate(items):
-            bg = alt_bg if row % 2 else row_bg
+            bg = self._row_base_bg(row)
 
             name_item = QTableWidgetItem(item.name)
             name_item.setFont(QFont("", 13))
-            name_item.setForeground(text_color)
+            name_item.setForeground(TEXT_COLOR)
             name_item.setBackground(bg)
 
             price_item = QTableWidgetItem(format_money(item.price))
             price_item.setFont(QFont("", 13))
-            price_item.setForeground(text_color)
+            price_item.setForeground(TEXT_COLOR)
             price_item.setBackground(bg)
             price_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -459,22 +474,24 @@ class MainWindow(QMainWindow):
                 box.stateChanged.connect(
                     lambda _state, r=row: self._on_person_changed(r)
                 )
+                box.clicked.connect(lambda _checked=False, r=row: self.highlight_row(r))
             self.person_boxes.append(row_boxes)
 
             common_box.stateChanged.connect(
                 lambda state, r=row: self._on_common_changed(r, state)
             )
+            common_box.clicked.connect(lambda _checked=False, r=row: self.highlight_row(r))
 
         total_row = len(items)
         total_name = QTableWidgetItem("Итого")
         total_name.setFont(bold)
-        total_name.setForeground(text_color)
-        total_name.setBackground(total_bg)
+        total_name.setForeground(TEXT_COLOR)
+        total_name.setBackground(ROW_TOTAL_BG)
 
         total_value = QTableWidgetItem(format_money(receipt_total))
         total_value.setFont(bold)
-        total_value.setForeground(text_color)
-        total_value.setBackground(total_bg)
+        total_value.setForeground(TEXT_COLOR)
+        total_value.setBackground(ROW_TOTAL_BG)
         total_value.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -483,8 +500,41 @@ class MainWindow(QMainWindow):
         self.table.setItem(total_row, 1, total_value)
         for col in range(2, 3 + len(PEOPLE)):
             filler = QTableWidgetItem("")
-            filler.setBackground(total_bg)
+            filler.setBackground(ROW_TOTAL_BG)
             self.table.setItem(total_row, col, filler)
+
+        # Flags: total row not selectable
+        for col in range(self.table.columnCount()):
+            item = self.table.item(total_row, col)
+            if item is not None:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+    def _row_base_bg(self, row: int) -> QColor:
+        if row >= len(self.items):
+            return ROW_TOTAL_BG
+        return ROW_ALT_BG if row % 2 else ROW_BG
+
+    def _apply_row_background(self, row: int, color: QColor) -> None:
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item is not None:
+                item.setBackground(color)
+            widget = self.table.cellWidget(row, col)
+            if widget is not None:
+                widget.setStyleSheet(f"background: {color.name()};")
+
+    def highlight_row(self, row: int) -> None:
+        if row < 0 or row >= len(self.items):
+            return
+        if self._highlighted_row is not None and self._highlighted_row != row:
+            prev = self._highlighted_row
+            self._apply_row_background(prev, self._row_base_bg(prev))
+        self._highlighted_row = row
+        self._apply_row_background(row, ROW_HIGHLIGHT_BG)
+        self.table.selectRow(row)
+
+    def _on_cell_clicked(self, row: int, _column: int) -> None:
+        self.highlight_row(row)
 
     def _on_common_changed(self, row: int, state: int) -> None:
         if self._syncing:

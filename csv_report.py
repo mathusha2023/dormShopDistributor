@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 from config import DEFAULT_REPORT_DIR
+from paths import app_root
 
-SETTINGS_FILE = Path(__file__).resolve().parent / ".settings"
+SETTINGS_FILE = app_root() / ".settings"
 
 
 def ensure_settings(default_dir: str = DEFAULT_REPORT_DIR) -> Path:
